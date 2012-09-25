@@ -1,26 +1,45 @@
-#include <math.h>
 #include "Thermistor.h"
 
-#define T0 273.15
+#if ARDUINO >= 100
+#include <Arduino.h> 
+#else
+#include <WProgram.h> 
+#endif
 
-/*
-Calculated:
-A = 0.0011304084062576293
-B = 0.0002339279413223266
-C = 0.0000000883788013458
+#include <math.h>
 
-Fitted:
-A = 0.0011304106122615558
-B = 0.0002339275532379136
-C = 0.0000000883810102069
-*/
+#define T0 273.15 // 0 °Celsius = 273.15 Kelvin
 
-Thermistor::Thermistor(int pin, float R1) {
-    _pin = pin;
-    _R1 = R1;
+Thermistor::Thermistor(unsigned char pin) {
+    init(pin, 10000, 0.0);
 }
 
-void Thermistor::init() {
+Thermistor::Thermistor(
+    unsigned char pin,
+	unsigned long Rbalance,
+	float offset) {
+	init(pin, Rbalance, offset);
+}
+
+void Thermistor::init(
+    unsigned char pin,
+	unsigned long Rbalance,
+	float offset) {
+	_pin = pin;
+	_Rbalance = Rbalance;
+	_offset = offset;
+	// Arduino library does not disconnect the digital pin buffer from the physical
+    // pin for analogRead(), so we're doing it here ourselves
+    DIDR0 |= _BV(_pin - A0);
+}
+
+float Thermistor::getTemperatureCelsius() {
+    _ADC = analogRead(_pin);
+    float m = _ADC / 1023.0;
+    _R = _Rbalance * m / (1.0 - m);
+	float logR = log(_R);
+    float T = 1.0 / (_A + _B * logR + _C * logR * logR * logR);
+	return T - T0 + _offset;
 }
 
 void Thermistor::calibrate(
