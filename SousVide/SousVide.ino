@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include <EEPROMex.h>
 #include <LiquidCrystal.h>
 #include <OneButton.h>
@@ -6,6 +8,12 @@
 
 // Uncomment to include debugging code
 // #define DEBUG 1
+
+#define SERIAL_SPEED 115200
+
+// Logging
+#define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
+#define LOG2(x, y) Serial.print(millis()); Serial.print(": "); Serial.print(x); Serial.println(y)
 
 // Pin assignments
 #define PIN_PLUS_BUTTON 2
@@ -80,17 +88,20 @@ LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PI
 #define BUTTON_START 2
 #define BUTTON_STOP 3
 #define BUTTON_FUNCTION 4
-OneButton plusButton(PIN_PLUS_BUTTON, true, true);
-OneButton minusButton(PIN_MINUS_BUTTON, true, true);
-OneButton startButton(PIN_START_BUTTON, true, false);
-OneButton stopButton(PIN_STOP_BUTTON, true, false);
-OneButton functionButton(PIN_FUNCTION_BUTTON, true, false);
+
+OneButton plusButton(PIN_PLUS_BUTTON, true, REPEAT);
+OneButton minusButton(PIN_MINUS_BUTTON, true, REPEAT);
+OneButton startButton(PIN_START_BUTTON, true, NO_REPEAT);
+OneButton stopButton(PIN_STOP_BUTTON, true, NO_REPEAT);
+OneButton functionButton(PIN_FUNCTION_BUTTON, true, NO_REPEAT);
 
 #define BUTTONS 5
 OneButton buttons[BUTTONS] = {
   plusButton, minusButton, startButton, stopButton, functionButton
 };
 
+
+// Display related functions
 void updateDisplay() {
   // TODO 
 }
@@ -146,9 +157,7 @@ void minusButtonClicked() {
 
 
 void setup() {
-#ifdef DEBUG
-  Serial.begin(9600);
-#endif
+  Serial.begin(SERIAL_SPEED);
 
   // Set pin modes
   // TODO
@@ -169,6 +178,7 @@ void setup() {
   // Attach button handler functions
   plusButton.attachClick(plusButtonClicked);
   minusButton.attachClick(minusButtonClicked);
+  // TODO: Attach the rest of the button click handlers
 
   // Display initialization message on LCD
   // TODO
@@ -184,12 +194,25 @@ void loop() {
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
+    LOG("Meuasring temperature");
     double reading = thermistor.getTemperatureCelsius();
     if (reading > MIN_TEMP && reading < MAX_TEMP) {
       lastSampleTimestamp = now;
       currentTemp = reading;
       pid.Compute();
+      LOG2(currentTemp, " C");
+#ifdef DEBUG
+      LOG("ADC value: ");
+  Serial.println(thermistor.getADC());
+  Serial.print("Resistance: ");
+  Serial.println(thermistor.getR());
+  Serial.print("Temperature: ");
+  Serial.println(currentTemp, 3);
+  delay(1000);
+#endif
+
     } else {
+      debug("Temperature outside of accepted range; rejecting value.");
       // TODO: log rejected reading
     }
   }
@@ -209,16 +232,5 @@ void loop() {
   for (int button = 0; button < BUTTONS; button++) {
     buttons[button].tick();
   }
-  
-#ifdef DEBUG
-  Serial.println("");
-  Serial.print("ADC value: ");
-  Serial.println(thermistor.getADC());
-  Serial.print("Resistance: ");
-  Serial.println(thermistor.getR());
-  Serial.print("Temperature: ");
-  Serial.println(currentTemp, 3);
-  delay(1000);
-#endif
 }
 
