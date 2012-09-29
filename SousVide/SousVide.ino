@@ -7,7 +7,7 @@
 #include <Thermistor.h>
 
 // Uncomment to include debugging code
-// #define DEBUG 1
+//#define DEBUG 1
 
 #define SERIAL_SPEED 115200
 
@@ -167,7 +167,10 @@ void setup() {
   
   // These calibration points are from the thermistor's factory data sheet
   // TODO: load calibration values from EEPROM
-  thermistor.calibrate(25.0, 50.0, 80.0, 10000.0, 3600.55, 1255.5);
+  //thermistor.calibrate(25.0, 50.0, 80.0, 10000.0, 3600.55, 1255.5);
+
+  // Results from manual calibration
+  thermistor.calibrate(21.2, 59.2, 81.0, 12434.0, 2645.0, 1180.0);
   
   // Set up the display with 16 characters and 2 lines
   lcd.begin(16, 2);
@@ -196,23 +199,23 @@ void loop() {
       || now < lastSampleTimestamp) { // millis() wrapped around
     LOG("Meuasring temperature");
     double reading = thermistor.getTemperatureCelsius();
+    lastSampleTimestamp = now;
+
+#ifdef DEBUG
+      LOG("ADC value: ");
+      LOG(thermistor.getADC());
+      LOG("Resistance: ");
+      LOG(thermistor.getR());
+      LOG("Temperature: ");
+      LOG(reading);
+#endif
+
     if (reading > MIN_TEMP && reading < MAX_TEMP) {
-      lastSampleTimestamp = now;
       currentTemp = reading;
       pid.Compute();
       LOG2(currentTemp, " C");
-#ifdef DEBUG
-      LOG("ADC value: ");
-  Serial.println(thermistor.getADC());
-  Serial.print("Resistance: ");
-  Serial.println(thermistor.getR());
-  Serial.print("Temperature: ");
-  Serial.println(currentTemp, 3);
-  delay(1000);
-#endif
-
     } else {
-      debug("Temperature outside of accepted range; rejecting value.");
+      LOG2("Temperature outside of accepted range; rejecting value ", reading);
       // TODO: log rejected reading
     }
   }
