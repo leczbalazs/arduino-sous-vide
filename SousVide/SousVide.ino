@@ -103,6 +103,11 @@ OneButton buttons[BUTTONS] = {
 
 // Display related functions
 void updateDisplay() {
+  // Fake display on serial
+  Serial.println(" ================");
+  Serial.println("|                |");
+  Serial.println("|                |");
+  Serial.println(" ================");
   // TODO 
 }
 
@@ -111,6 +116,7 @@ void saveConfig() {
 }
 
 void loadConfig() {
+  // TODO
 }
 
 void increaseTargetTemp() {
@@ -188,11 +194,14 @@ void setup() {
 
   // TODO: move this state transition to loop()
   state = STATE_STOPPED;
+  
+  updateDisplay();
 }  
 
 
 void loop() {
   unsigned long now = millis();
+  boolean updateNeeded = false;
   
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
@@ -218,6 +227,7 @@ void loop() {
       LOG2("Temperature outside of accepted range; rejecting value ", reading);
       // TODO: log rejected reading
     }
+    updateNeeded = true; 
   }
 
   // Shift the control window if needed  
@@ -231,6 +241,11 @@ void loop() {
     digitalWrite(PIN_RELAY,LOW);
   }
   
+  if (updateNeeded) {
+    updateDisplay();
+    updateNeeded = false;
+  }
+
   // Poll button states
   for (int button = 0; button < BUTTONS; button++) {
     buttons[button].tick();
