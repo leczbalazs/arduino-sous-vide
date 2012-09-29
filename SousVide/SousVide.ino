@@ -11,10 +11,6 @@
 
 #define SERIAL_SPEED 115200
 
-// Logging
-#define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
-#define LOG2(x, y) Serial.print(millis()); Serial.print(": "); Serial.print(x); Serial.println(y)
-
 // Pin assignments
 #define PIN_PLUS_BUTTON 2
 #define PIN_MINUS_BUTTON 3
@@ -29,6 +25,7 @@
 #define PIN_LCD_D5 10
 #define PIN_LCD_D6 11
 #define PIN_LCD_D7 12
+#define PIN_STATUS_LED 13
 
 // Default target temperature
 #define DEFAULT_TARGET_TEMP 55.0 // [C]
@@ -40,15 +37,15 @@
 #define WINDOW_SIZE 5000 // [ms]
 
 // Target temperature boundaries
-#define MIN_TARGET_TEMP 30.0 // [C]
+#define MIN_TARGET_TEMP 20.0 // [C]
 #define MAX_TARGET_TEMP 90.0 // [C]
 
 // Temperature setting granularity
 #define TEMP_STEP 0.5 // [C]
 
 // Boundaries for determining if temperature readings are sane
-#define MIN_TEMP -2.0 // [C] -- We are not expecting ice
-#define MAX_TEMP 102.0 // [C] -- We are not expecting superheated water or steam
+#define MIN_TEMP 0.1 // [C] -- We are not expecting ice
+#define MAX_TEMP 99.9 // [C] -- We are not expecting superheated water or steam
 
 // Possible states
 #define STATE_INIT 0
@@ -62,6 +59,10 @@
 #define EVENT_CLICK 0
 #define EVENT_DOUBLECLICK 1
 #define EVENT_LONGPRESS 2
+
+// Logging
+#define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
+#define LOG2(x, y) Serial.print(millis()); Serial.print(": "); Serial.print(x); Serial.println(y)
 
 // Global variables
 unsigned char state = STATE_INIT; // Current system state
@@ -77,7 +78,7 @@ Thermistor thermistor(PIN_THERMISTOR); // NCT thermistor
 
 // PID Controller
 // TODO: move PID parameters to EEPROM and make them modifiable via the config menu
-PID pid(&currentTemp, &onDuration, &targetTemp, 2, 5, 1, DIRECT); // PID controller
+PID pid(&currentTemp, &onDuration, &targetTemp, 4.0, 5.0, 0.5, DIRECT); // PID controller
 
 // LCD Display
 LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
@@ -88,27 +89,37 @@ LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PI
 #define BUTTON_START 2
 #define BUTTON_STOP 3
 #define BUTTON_FUNCTION 4
-
 OneButton plusButton(PIN_PLUS_BUTTON, true, REPEAT);
 OneButton minusButton(PIN_MINUS_BUTTON, true, REPEAT);
 OneButton startButton(PIN_START_BUTTON, true, NO_REPEAT);
 OneButton stopButton(PIN_STOP_BUTTON, true, NO_REPEAT);
 OneButton functionButton(PIN_FUNCTION_BUTTON, true, NO_REPEAT);
 
-#define BUTTONS 5
-OneButton buttons[BUTTONS] = {
-  plusButton, minusButton, startButton, stopButton, functionButton
-};
 
+void formatTemp(char* output, double temperature) {
+  sprintf(output, "%2d.%1dC",
+      (int)temperature,
+      (((unsigned int)(temperature * 1000) % 1000) + 50) / 100);
+}
 
 // Display related functions
 void updateDisplay() {
   // Fake display on serial
-  Serial.println(" ================");
-  Serial.println("|                |");
-  Serial.println("|                |");
-  Serial.println(" ================");
-  // TODO 
+  Serial.println("/================\\");
+  Serial.print("|C:");
+  char temp[6];
+  formatTemp(temp, currentTemp);
+  Serial.print(temp);
+  Serial.print(" Out: ");
+  Serial.print(outputState ? "ON " : "OFF");
+  Serial.println("|");
+  Serial.print("|T:");
+  formatTemp(temp, targetTemp);
+  Serial.print(temp);
+  Serial.println("         |");
+  Serial.println("\\================/");
+  // TODO: print output to LCD
+  Serial.println(onDuration);
 }
 
 void saveConfig() {
@@ -153,16 +164,39 @@ void handleEvent(char button, char event) {
 
 
 void plusButtonClicked() {
+  LOG("PLUS button pressed");
   handleEvent(BUTTON_PLUS, EVENT_CLICK);
 }
 
-
 void minusButtonClicked() {
+  LOG("MINUS button clicked");
   handleEvent(BUTTON_MINUS, EVENT_CLICK);
+}
+
+void startButtonClicked() {
+  LOG("START button clicked");
+  handleEvent(BUTTON_START, EVENT_CLICK);
+}
+
+void stopButtonClicked() {
+  LOG("STOP button clicked");
+  handleEvent(BUTTON_STOP, EVENT_CLICK);
+}
+
+void functionButtonClicked() {
+  LOG("FUNCTION button clicked");
+  handleEvent(BUTTON_FUNCTION, EVENT_CLICK);
 }
 
 
 void setup() {
+  // Make sure the output is off by default
+  digitalWrite(PIN_RELAY, LOW);
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_STATUS_LED, LOW);
+  pinMode(PIN_STATUS_LED, OUTPUT);
+
+  // Set serial speed
   Serial.begin(SERIAL_SPEED);
 
   // Set pin modes
@@ -174,7 +208,6 @@ void setup() {
   // These calibration points are from the thermistor's factory data sheet
   // TODO: load calibration values from EEPROM
   //thermistor.calibrate(25.0, 50.0, 80.0, 10000.0, 3600.55, 1255.5);
-
   // Results from manual calibration
   thermistor.calibrate(21.2, 59.2, 81.0, 12434.0, 2645.0, 1180.0);
   
@@ -183,6 +216,7 @@ void setup() {
   
   // Set up the PID controller
   pid.SetMode(AUTOMATIC);
+  pid.SetOutputLimits(0, WINDOW_SIZE);
 
   // Attach button handler functions
   plusButton.attachClick(plusButtonClicked);
@@ -198,7 +232,6 @@ void setup() {
   updateDisplay();
 }  
 
-
 void loop() {
   unsigned long now = millis();
   boolean updateNeeded = false;
@@ -206,23 +239,19 @@ void loop() {
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
-    LOG("Meuasring temperature");
     double reading = thermistor.getTemperatureCelsius();
     lastSampleTimestamp = now;
 
 #ifdef DEBUG
-      LOG("ADC value: ");
-      LOG(thermistor.getADC());
-      LOG("Resistance: ");
-      LOG(thermistor.getR());
-      LOG("Temperature: ");
-      LOG(reading);
+    LOG2("ADC value: ", thermistor.getADC());
+    LOG2("Resistance: ", thermistor.getR());
+    LOG2("Temperature: ", reading);
 #endif
 
     if (reading > MIN_TEMP && reading < MAX_TEMP) {
       currentTemp = reading;
       pid.Compute();
-      LOG2(currentTemp, " C");
+      LOG2("Current temperature [C]: ", currentTemp);
     } else {
       LOG2("Temperature outside of accepted range; rejecting value ", reading);
       // TODO: log rejected reading
@@ -236,19 +265,32 @@ void loop() {
   }
   // Set the relay state according to the PID output
   if (now < windowStartTime + onDuration) {
+    if (!outputState) {
+      updateNeeded = true;
+    }
+    outputState = true;
     digitalWrite(PIN_RELAY, HIGH);
+    digitalWrite(PIN_STATUS_LED, HIGH);
   } else {
-    digitalWrite(PIN_RELAY,LOW);
+    if (outputState) {
+      updateNeeded = true;
+    }
+    outputState = false;
+    digitalWrite(PIN_RELAY, LOW);
+    digitalWrite(PIN_STATUS_LED, LOW);
   }
   
+  // Update the display if needed
   if (updateNeeded) {
     updateDisplay();
     updateNeeded = false;
   }
 
   // Poll button states
-  for (int button = 0; button < BUTTONS; button++) {
-    buttons[button].tick();
-  }
+  plusButton.tick();
+  minusButton.tick();
+  startButton.tick();
+  stopButton.tick();
+  functionButton.tick();
 }
 
