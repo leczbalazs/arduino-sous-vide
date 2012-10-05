@@ -9,7 +9,15 @@
 // Uncomment to include debugging code
 //#define DEBUG 1
 
+// TODO: Implement timer
+
 #define SERIAL_SPEED 115200
+
+// Configuration data address in the EEPROM
+#define CONFIG_ADDRESS 0
+// Configuration data states
+#define CONFIG_VALID 1
+#define CONFIG_INVALID 2
 
 // Pin assignments
 #define PIN_PLUS_BUTTON 2
@@ -47,32 +55,52 @@
 #define MIN_TEMP 0.1 // [C] -- We are not expecting ice
 #define MAX_TEMP 99.9 // [C] -- We are not expecting superheated water or steam
 
+// Maximum minutes on the timer
+#define MAX_TIME 999 // [minutes]
+
 // Possible states
 #define STATE_INIT 0
 #define STATE_STOPPED 1
 #define STATE_RUNNING 2
 // TODO: add states for
+// - balance resistor value setting
 // - temperature calibration
 // - PID settings (auto-calibration?)
+// - factory reset?
+// - manual output on/off?
 
 // Possible events
 #define EVENT_CLICK 0
 #define EVENT_DOUBLECLICK 1
 #define EVENT_LONGPRESS 2
 
+// What the PLUS/MINUS buttons should ve adjusting
+#define ADJUST_TEMP 0
+#define ADJUST_TIME 1
+
 // Logging
 #define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
 #define LOG2(x, y) Serial.print(millis()); Serial.print(": "); Serial.print(x); Serial.println(y)
 
-// Global variables
+
+//
+// Global state variables
+//
 unsigned char state = STATE_INIT; // Current system state
+unsigned long now; // Current time (time elapsed since power-on) [ms]
+unsigned char adjustTarget = ADJUST_TEMP; // What the PLUS/MINUS buttons are adjusting
 unsigned long lastSampleTimestamp; // The timestamp of the last temperature sample that was taken [ms]
 double currentTemp; // Current temperature [C]
 double targetTemp = DEFAULT_TARGET_TEMP; // Target temperature [C]
+int timer = -1; // Current number of minutes on the timer (negative values mean the timer is disabled) [min]
 unsigned long windowStartTime;
 double onDuration; // Time to keep the relay ON [s]
-boolean outputState; // Current state of the relay [false: off, true: on]
+boolean relayState; // Current state of the relay [false: off, true: on]
+boolean updateNeeded; // Whether a display update is required
 
+//
+// Global objects
+//
 // Temperature sensor
 Thermistor thermistor(PIN_THERMISTOR); // NCT thermistor
 
@@ -96,11 +124,21 @@ OneButton stopButton(PIN_STOP_BUTTON, true, NO_REPEAT);
 OneButton functionButton(PIN_FUNCTION_BUTTON, true, NO_REPEAT);
 
 
+// Format a temperature value (format: ##.#C)
+// We need this manual implementation as float formatting is not included in libavr used by Arduino
+// TODO: check if it's possible to override compilation flags and make it actually include the *printf()
+// version that supports floats 
 void formatTemp(char* output, double temperature) {
-  sprintf(output, "%2d.%1dC",
-      (int)temperature,
-      (((unsigned int)(temperature * 1000) % 1000) + 50) / 100);
+  unsigned int temp_integer =  (int)temperature;
+  unsigned int temp_fractional = (((unsigned int)(temperature * 1000) % 1000) + 50) / 100;
+  if (temp_fractional == 10) {
+    temp_integer++;
+    temp_fractional = 0;
+  }
+
+  sprintf(output, "%2d.%1dC", temp_integer, temp_fractional);
 }
+
 
 // Display related functions
 void updateDisplay() {
@@ -111,58 +149,216 @@ void updateDisplay() {
   formatTemp(temp, currentTemp);
   Serial.print(temp);
   Serial.print(" Out: ");
-  Serial.print(outputState ? "ON " : "OFF");
+  Serial.print(relayState ? "ON " : "OFF");
   Serial.println("|");
   Serial.print("|T:");
   formatTemp(temp, targetTemp);
   Serial.print(temp);
-  Serial.println("         |");
+  Serial.print((adjustTarget == ADJUST_TEMP) ? "<" : ">");
+  if (timer >= 0) {
+    Serial.print(timer);
+  } else {
+    Serial.print("___");
+  }
+  switch (state) {
+    case STATE_INIT:
+      Serial.print(" INIT");
+      break;
+    case STATE_STOPPED:
+      Serial.print(" STOP");
+      break;
+    case STATE_RUNNING:
+      Serial.print("  RUN");
+      break;
+  }
+  Serial.println("|");
   Serial.println("\\================/");
   // TODO: print output to LCD
-  Serial.println(onDuration);
 }
 
+
+// Configuration data layout in EEPROM:
+//
+// - Config state (char)
+// - Rbalance (unsigned long)
+// - T1 (double)
+// - T2 (double)
+// - T3 (double)
+// - R1 (double)
+// - R2 (double)
+// - R3 (double)
+
+// Save configuration data to EEPROM
 void saveConfig() {
-  // TODO
+  LOG2("Saving configuration values to EEPROM at address ", CONFIG_ADDRESS);
+  // Mark the config as invalid
+  EEPROM.write(CONFIG_ADDRESS, CONFIG_INVALID);
+
+  unsigned int address = CONFIG_ADDRESS + 1;  
+  
+  // Save thermistor calibration data
+  {
+    EEPROM.updateLong(address, thermistor.getRbalance());
+    address += sizeof(long);
+    EEPROM.updateDouble(address, thermistor.getT1());
+    address += sizeof(double);
+    EEPROM.updateDouble(address, thermistor.getT2());
+    address += sizeof(double);
+    EEPROM.updateDouble(address, thermistor.getT3());
+    address += sizeof(double);
+    EEPROM.updateDouble(address, thermistor.getR1());
+    address += sizeof(double);
+    EEPROM.updateDouble(address, thermistor.getR2());
+    address += sizeof(double);
+    EEPROM.updateDouble(address, thermistor.getR3());
+    address += sizeof(double);
+  }
+  
+  // Mark the config as valid
+  EEPROM.write(CONFIG_ADDRESS, CONFIG_VALID);
+  LOG("Successfully saved config values");
 }
 
+
+// Load configuration data from EEPROM
 void loadConfig() {
-  // TODO
+  int configState = EEPROM.read(CONFIG_ADDRESS);
+  if (configState != CONFIG_VALID) {
+    LOG2("No valid configuration found at EEPROM address ", CONFIG_ADDRESS);
+    LOG("Using default values and saving config to EEPROM");
+
+    // These calibration points are from the thermistor's factory data sheet
+    // Manufacturer: Betatherm Part number: 10K3A542I
+    //thermistor.calibrate(25.0, 50.0, 80.0, 10000.0, 3600.55, 1255.5);
+    // Results from manual calibration
+    thermistor.calibrate(21.2, 59.2, 81.0, 12434.0, 2645.0, 1180.0);
+    saveConfig();
+    return;
+  }
+
+  LOG2("Loading configuration values from EEPROM address ", CONFIG_ADDRESS);
+  
+  unsigned int address = CONFIG_ADDRESS + 1;
+
+  // Calibrate thermistor
+  {
+    unsigned long Rbalance;
+    double T1, T2, T3;
+    double R1, R2, R3;
+  
+    Rbalance = EEPROM.readLong(address);
+    address += sizeof(long);
+    T1 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    T2 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    T3 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    R1 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    R2 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    R3 = EEPROM.readDouble(address);
+    address += sizeof(double);
+    
+    LOG("Loaded config values from EEPROM");
+    LOG2("Rbalance: ", Rbalance);
+    LOG2("T1: ", T1);
+    LOG2("T2: ", T2);
+    LOG2("T3: ", T3);
+    LOG2("R1: ", R1);
+    LOG2("R2: ", R2);
+    LOG2("R3: ", R3);
+    
+    thermistor.setRbalance(Rbalance);
+    thermistor.calibrate(T1, T2, T3, R1, R2, R3);
+  }
 }
+
 
 void increaseTargetTemp() {
   if (targetTemp < MAX_TARGET_TEMP - TEMP_STEP) {
     targetTemp += TEMP_STEP;
   }
-  updateDisplay();
 }
+
 
 void decreaseTargetTemp() {
   if (targetTemp > MIN_TARGET_TEMP + TEMP_STEP) {
     targetTemp -= TEMP_STEP;
   }
-  updateDisplay();
 }
 
-void handleEvent(char button, char event) {
-  switch (state) {
-  case STATE_INIT:
-    // Don't accept any keypresses during initialization
-    break;
-  case STATE_STOPPED:
-    switch (button) {
-    case BUTTON_PLUS:
-      increaseTargetTemp();
-      break;
-    case BUTTON_MINUS:
-      decreaseTargetTemp();
-      break;
-    }
-    break;
+
+void increaseTime() {
+  if (timer < MAX_TIME) {
+    timer++;
   }
 }
 
 
+void decreaseTime() {
+  if (timer > 0) {
+    timer--;
+  }
+  if (timer == 0) {
+    timer = -1;
+  }
+}
+
+
+// Handle button events
+void handleEvent(char button, char event) {
+  if (state == STATE_STOPPED
+      || state == STATE_RUNNING) {
+    switch (button) {
+    case BUTTON_PLUS:
+      if (adjustTarget == ADJUST_TEMP) {
+        increaseTargetTemp();
+      } else {
+        increaseTime();
+      }
+      updateNeeded = true;
+      break;
+    case BUTTON_MINUS:
+      if (adjustTarget == ADJUST_TEMP) {
+        decreaseTargetTemp();
+      } else {
+        decreaseTime();
+      }
+      updateNeeded = true;
+      break;
+    case BUTTON_FUNCTION:
+      if (adjustTarget == ADJUST_TIME) {
+        adjustTarget = ADJUST_TEMP;
+      } else {
+        adjustTarget = ADJUST_TIME;
+      }
+      updateNeeded = true;
+      break;
+    }
+  }
+  
+  if (state == STATE_STOPPED) {
+    switch (button) {
+      case BUTTON_START:
+      state = STATE_RUNNING;
+      updateNeeded = true;
+      break;
+    }
+  } else if (state == STATE_RUNNING) {
+    switch (button) {
+      case BUTTON_STOP:
+      relayOff();
+      state = STATE_STOPPED;
+      updateNeeded = true;
+      break;
+    }
+  }
+}
+
+
+// Button event handler functions
 void plusButtonClicked() {
   LOG("PLUS button pressed");
   handleEvent(BUTTON_PLUS, EVENT_CLICK);
@@ -188,32 +384,52 @@ void functionButtonClicked() {
   handleEvent(BUTTON_FUNCTION, EVENT_CLICK);
 }
 
+void functionButtonLongPressed() {
+  LOG("FUNCTION button long pressed");
+  handleEvent(BUTTON_FUNCTION, EVENT_LONGPRESS);
+}
+
+
+void relayOn() {
+  if (!relayState) {
+    updateNeeded = true;
+  }
+  relayState = true;
+  digitalWrite(PIN_RELAY, HIGH);
+  digitalWrite(PIN_STATUS_LED, HIGH);
+}
+
+
+void relayOff() {
+  if (relayState) {
+    updateNeeded = true;
+  }
+  relayState = false;
+  digitalWrite(PIN_RELAY, LOW);
+  digitalWrite(PIN_STATUS_LED, LOW);
+}
+
 
 void setup() {
-  // Make sure the output is off by default
-  digitalWrite(PIN_RELAY, LOW);
-  pinMode(PIN_RELAY, OUTPUT);
-  digitalWrite(PIN_STATUS_LED, LOW);
-  pinMode(PIN_STATUS_LED, OUTPUT);
-
   // Set serial speed
   Serial.begin(SERIAL_SPEED);
+  LOG("Initializing"); 
 
   // Set pin modes
-  // TODO
-  
-  // Save startup time
-  // TODO
-  
-  // These calibration points are from the thermistor's factory data sheet
-  // TODO: load calibration values from EEPROM
-  //thermistor.calibrate(25.0, 50.0, 80.0, 10000.0, 3600.55, 1255.5);
-  // Results from manual calibration
-  thermistor.calibrate(21.2, 59.2, 81.0, 12434.0, 2645.0, 1180.0);
-  
+  pinMode(PIN_RELAY, OUTPUT);
+  pinMode(PIN_STATUS_LED, OUTPUT);
+
+  // Make sure the output is off by default
+  relayOff();
+
   // Set up the display with 16 characters and 2 lines
   lcd.begin(16, 2);
-  
+  // Display initialization message on LCD
+  // TODO
+
+  // Load calibration and configuration data from EEPROM
+  loadConfig();
+
   // Set up the PID controller
   pid.SetMode(AUTOMATIC);
   pid.SetOutputLimits(0, WINDOW_SIZE);
@@ -221,21 +437,24 @@ void setup() {
   // Attach button handler functions
   plusButton.attachClick(plusButtonClicked);
   minusButton.attachClick(minusButtonClicked);
-  // TODO: Attach the rest of the button click handlers
-
-  // Display initialization message on LCD
-  // TODO
+  startButton.attachClick(startButtonClicked);
+  stopButton.attachClick(stopButtonClicked);
+  functionButton.attachClick(functionButtonClicked);
+  functionButton.attachLongPress(functionButtonLongPressed);
 
   // TODO: move this state transition to loop()
+  // We should take a few temperature samples to make sure
+  // it's stable before we transition from STATE_INIT to STATE_STOPPED
   state = STATE_STOPPED;
   
   updateDisplay();
 }  
 
+
+// Main loop
 void loop() {
-  unsigned long now = millis();
-  boolean updateNeeded = false;
-  
+  now = millis();
+
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
@@ -252,6 +471,7 @@ void loop() {
       currentTemp = reading;
       pid.Compute();
       LOG2("Current temperature [C]: ", currentTemp);
+      LOG2("Relay ON duration [ms]: ", onDuration);
     } else {
       LOG2("Temperature outside of accepted range; rejecting value ", reading);
       // TODO: log rejected reading
@@ -263,21 +483,13 @@ void loop() {
   if (now > windowStartTime + WINDOW_SIZE) {
     windowStartTime += WINDOW_SIZE;
   }
-  // Set the relay state according to the PID output
-  if (now < windowStartTime + onDuration) {
-    if (!outputState) {
-      updateNeeded = true;
+  if (state == STATE_RUNNING) {
+    // Set the relay state according to the PID output
+    if (now < windowStartTime + onDuration) {
+      relayOn();
+    } else {
+      relayOff();
     }
-    outputState = true;
-    digitalWrite(PIN_RELAY, HIGH);
-    digitalWrite(PIN_STATUS_LED, HIGH);
-  } else {
-    if (outputState) {
-      updateNeeded = true;
-    }
-    outputState = false;
-    digitalWrite(PIN_RELAY, LOW);
-    digitalWrite(PIN_STATUS_LED, LOW);
   }
   
   // Update the display if needed
