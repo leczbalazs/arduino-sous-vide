@@ -53,6 +53,16 @@ float Thermistor::getTemperatureCelsius() {
 void Thermistor::calibrate(
         float T1, float T2, float T3,
         float R1, float R2, float R3) {
+    // Store calibration data points
+   _T1 = T1;
+   _T2 = T2;
+   _T3 = T3;
+   _R1 = R1;
+   _R2 = R2;
+   _R3 = R3;
+
+    // Calculate Steinhart-Hart coefficients
+    // Based on http://en.wikipedia.org/wiki/Steinhart%E2%80%93Hart_equation
     float L1 = log(R1);
     float L2 = log(R2);
     float L3 = log(R3);
