@@ -51,12 +51,13 @@
 // Temperature setting granularity
 #define TEMP_STEP 0.5 // [C]
 
-// Boundaries for determining if temperature readings are sane
+// Boundaries for determining whether temperature readings are sane
 #define MIN_TEMP 0.1 // [C] -- We are not expecting ice
 #define MAX_TEMP 99.9 // [C] -- We are not expecting superheated water or steam
 
 // Maximum minutes on the timer
 #define MAX_TIME 999 // [minutes]
+#define MINUTE 60000 // [ms]
 
 // Possible states
 #define STATE_INIT 0
@@ -68,15 +69,16 @@
 // - PID settings (auto-calibration?)
 // - factory reset?
 // - manual output on/off?
+// - error
 
 // Possible events
 #define EVENT_CLICK 0
 #define EVENT_DOUBLECLICK 1
 #define EVENT_LONGPRESS 2
 
-// What the PLUS/MINUS buttons should ve adjusting
+// What the PLUS/MINUS buttons should be adjusting
 #define ADJUST_TEMP 0
-#define ADJUST_TIME 1
+#define ADJUST_TIMER 1
 
 // Logging
 #define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
@@ -97,6 +99,7 @@ unsigned long windowStartTime;
 double onDuration; // Time to keep the relay ON [s]
 boolean relayState; // Current state of the relay [false: off, true: on]
 boolean updateNeeded; // Whether a display update is required
+unsigned long lastTick; // Timestamp of the last timer decrement [ms]
 
 //
 // Global objects
@@ -144,19 +147,20 @@ void formatTemp(char* output, double temperature) {
 void updateDisplay() {
   // Fake display on serial
   Serial.println("/================\\");
-  Serial.print("|C:");
+  Serial.print("|C:"); // Current temperature
   char temp[6];
   formatTemp(temp, currentTemp);
   Serial.print(temp);
-  Serial.print(" Out: ");
+  Serial.print(" Out: "); // Output state
   Serial.print(relayState ? "ON " : "OFF");
   Serial.println("|");
-  Serial.print("|T:");
+  Serial.print("|T:"); // Target temperature
   formatTemp(temp, targetTemp);
   Serial.print(temp);
-  Serial.print((adjustTarget == ADJUST_TEMP) ? "<" : ">");
+  Serial.print((adjustTarget == ADJUST_TEMP) ? "<" : ">"); // Adjust target selector
   if (timer >= 0) {
-    Serial.print(timer);
+    sprintf(temp, "%3d", timer); // Remaining minutes on timer
+    Serial.print(temp);
   } else {
     Serial.print("___");
   }
@@ -290,16 +294,21 @@ void decreaseTargetTemp() {
 }
 
 
-void increaseTime() {
+void increaseTimer() {
   if (timer < MAX_TIME) {
     timer++;
+    lastTick = now;
+    if (timer < 1) {
+      timer = 1;
+    }
   }
 }
 
 
-void decreaseTime() {
+void decreaseTimer() {
   if (timer > 0) {
     timer--;
+    lastTick = now;
   }
   if (timer == 0) {
     timer = -1;
@@ -316,7 +325,7 @@ void handleEvent(char button, char event) {
       if (adjustTarget == ADJUST_TEMP) {
         increaseTargetTemp();
       } else {
-        increaseTime();
+        increaseTimer();
       }
       updateNeeded = true;
       break;
@@ -324,15 +333,15 @@ void handleEvent(char button, char event) {
       if (adjustTarget == ADJUST_TEMP) {
         decreaseTargetTemp();
       } else {
-        decreaseTime();
+        decreaseTimer();
       }
       updateNeeded = true;
       break;
     case BUTTON_FUNCTION:
-      if (adjustTarget == ADJUST_TIME) {
+      if (adjustTarget == ADJUST_TIMER) {
         adjustTarget = ADJUST_TEMP;
       } else {
-        adjustTarget = ADJUST_TIME;
+        adjustTarget = ADJUST_TIMER;
       }
       updateNeeded = true;
       break;
@@ -343,6 +352,7 @@ void handleEvent(char button, char event) {
     switch (button) {
       case BUTTON_START:
       state = STATE_RUNNING;
+      lastTick = now;
       updateNeeded = true;
       break;
     }
@@ -455,6 +465,20 @@ void setup() {
 void loop() {
   now = millis();
 
+  // Decrement the timer
+  if (timer > 0 && state == STATE_RUNNING) {
+    if (now > (lastTick + MINUTE)) {
+      lastTick += MINUTE;
+      timer--;
+      updateNeeded = true;
+      if (timer == 0) {
+        // Reached the preset time
+        state = STATE_STOPPED;
+        timer = -1;
+      }
+    } 
+  }
+
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
@@ -474,7 +498,7 @@ void loop() {
       LOG2("Relay ON duration [ms]: ", onDuration);
     } else {
       LOG2("Temperature outside of accepted range; rejecting value ", reading);
-      // TODO: log rejected reading
+      // TODO: move to an error state after multiple rejected readings
     }
     updateNeeded = true; 
   }
