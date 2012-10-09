@@ -44,6 +44,10 @@
 // Control window size (for turning the PID output value into a slow PWM signal)
 #define WINDOW_SIZE 5000 // [ms]
 
+// Minimum time the relay is allowed to turn on
+// There's no point in turning on a mechanical relay for less than 200 ms
+#define MIN_ON_DURATION 200 // [ms]
+
 // Target temperature boundaries
 #define MIN_TARGET_TEMP 20.0 // [C]
 #define MAX_TARGET_TEMP 90.0 // [C]
@@ -145,40 +149,54 @@ void formatTemp(char* output, double temperature) {
 
 // Display related functions
 void updateDisplay() {
-  // Fake display on serial
-  Serial.println("/================\\");
-  Serial.print("|C:"); // Current temperature
-  char temp[6];
+  lcd.setCursor(0,0);  
+  lcd.print("Current: ");
+  char temp[8];
   formatTemp(temp, currentTemp);
-  Serial.print(temp);
-  Serial.print(" Out: "); // Output state
-  Serial.print(relayState ? "ON " : "OFF");
-  Serial.println("|");
-  Serial.print("|T:"); // Target temperature
+  lcd.print(temp);
+  
+  lcd.setCursor(0, 1);
+  lcd.print(" Target: ");
   formatTemp(temp, targetTemp);
-  Serial.print(temp);
-  Serial.print((adjustTarget == ADJUST_TEMP) ? "<" : ">"); // Adjust target selector
-  if (timer >= 0) {
-    sprintf(temp, "%3d", timer); // Remaining minutes on timer
-    Serial.print(temp);
+  lcd.print(temp);
+  if (adjustTarget == ADJUST_TEMP) {
+    lcd.print(" <-");
   } else {
-    Serial.print("___");
+    lcd.print("   ");
   }
+  
+  lcd.setCursor(0, 2);
+  lcd.print("  Timer:  ");
+  if (timer >= 0) {
+    sprintf(temp, "%3dm", timer); // Remaining minutes on timer
+    lcd.print(temp);
+  } else {
+    lcd.print("___m");
+  }
+  if (adjustTarget == ADJUST_TIMER) {
+    lcd.print(" <-");
+  } else {
+    lcd.print("   ");
+  }
+
+  lcd.setCursor(0, 3);
+  lcd.print("State: ");
   switch (state) {
     case STATE_INIT:
-      Serial.print(" INIT");
+      lcd.print("INIT ");
       break;
     case STATE_STOPPED:
-      Serial.print(" STOP");
+      lcd.print("STOP ");
       break;
     case STATE_RUNNING:
-      Serial.print("  RUN");
+      lcd.print("RUN  ");
       break;
   }
-  Serial.println("|");
-  Serial.println("\\================/");
-  // TODO: print output to LCD
+  
+  lcd.print("Out: ");
+  lcd.print(relayState ? "ON " : "OFF");
 }
+
 
 
 // Configuration data layout in EEPROM:
@@ -281,14 +299,14 @@ void loadConfig() {
 
 
 void increaseTargetTemp() {
-  if (targetTemp < MAX_TARGET_TEMP - TEMP_STEP) {
+  if (targetTemp <= MAX_TARGET_TEMP - TEMP_STEP) {
     targetTemp += TEMP_STEP;
   }
 }
 
 
 void decreaseTargetTemp() {
-  if (targetTemp > MIN_TARGET_TEMP + TEMP_STEP) {
+  if (targetTemp >= MIN_TARGET_TEMP + TEMP_STEP) {
     targetTemp -= TEMP_STEP;
   }
 }
@@ -433,9 +451,9 @@ void setup() {
   relayOff();
 
   // Set up the display with 16 characters and 2 lines
-  lcd.begin(16, 2);
+  lcd.begin(20, 4);
   // Display initialization message on LCD
-  // TODO
+  updateDisplay();
 
   // Load calibration and configuration data from EEPROM
   loadConfig();
@@ -452,14 +470,38 @@ void setup() {
   functionButton.attachClick(functionButtonClicked);
   functionButton.attachLongPress(functionButtonLongPressed);
 
-  // TODO: move this state transition to loop()
   // We should take a few temperature samples to make sure
   // it's stable before we transition from STATE_INIT to STATE_STOPPED
-  state = STATE_STOPPED;
-  
+
+  state = STATE_STOPPED;  
   updateDisplay();
 }  
 
+
+void sampleTemperature() {
+  double reading = thermistor.getTemperatureCelsius();
+  lastSampleTimestamp = now;
+
+#ifdef DEBUG
+  LOG2("ADC value: ", thermistor.getADC());
+  LOG2("Resistance: ", thermistor.getR());
+  LOG2("Temperature: ", reading);
+#endif
+
+  if (reading > MIN_TEMP && reading < MAX_TEMP) {
+    currentTemp = reading;
+    pid.Compute();
+    LOG2("Current temperature [C]: ", currentTemp);
+    LOG2("Relay ON duration [ms]: ", onDuration);
+    if (onDuration < MIN_ON_DURATION) {
+      onDuration = 0;
+    }
+    LOG2("Relay ON duration after applying minimum limit [ms]: ", onDuration);
+  } else {
+    LOG2("Temperature outside of accepted range; rejecting value ", reading);
+    // TODO: move to an error state after multiple rejected readings
+  }
+}
 
 // Main loop
 void loop() {
@@ -474,6 +516,7 @@ void loop() {
       if (timer == 0) {
         // Reached the preset time
         state = STATE_STOPPED;
+        relayOff();
         timer = -1;
       }
     } 
@@ -482,24 +525,7 @@ void loop() {
   // Measure the temperature at every sample interval
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
-    double reading = thermistor.getTemperatureCelsius();
-    lastSampleTimestamp = now;
-
-#ifdef DEBUG
-    LOG2("ADC value: ", thermistor.getADC());
-    LOG2("Resistance: ", thermistor.getR());
-    LOG2("Temperature: ", reading);
-#endif
-
-    if (reading > MIN_TEMP && reading < MAX_TEMP) {
-      currentTemp = reading;
-      pid.Compute();
-      LOG2("Current temperature [C]: ", currentTemp);
-      LOG2("Relay ON duration [ms]: ", onDuration);
-    } else {
-      LOG2("Temperature outside of accepted range; rejecting value ", reading);
-      // TODO: move to an error state after multiple rejected readings
-    }
+    sampleTemperature();
     updateNeeded = true; 
   }
 
@@ -509,7 +535,7 @@ void loop() {
   }
   if (state == STATE_RUNNING) {
     // Set the relay state according to the PID output
-    if (now < windowStartTime + onDuration) {
+    if (now <= windowStartTime + onDuration) {
       relayOn();
     } else {
       relayOff();
