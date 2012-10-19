@@ -6,6 +6,11 @@
 #include <PID_v1.h>
 #include <Thermistor.h>
 
+// TODOs
+// - refactor temperature measurement to use moving window average (smoothing)
+// - implement PID tuning menu
+// - implement saving/loading PID parameters
+
 // Uncomment to include debugging code
 //#define DEBUG 1
 
@@ -78,7 +83,7 @@
 #define EVENT_DOUBLECLICK 1
 #define EVENT_LONGPRESS 2
 
-// What the PLUS/MINUS buttons should be adjusting
+// What the PLUS/MINUS buttons should be adjusting in STATE_MAIN
 #define ADJUST_TEMP 0
 #define ADJUST_TIMER 1
 
@@ -91,7 +96,7 @@
 // Global state variables
 //
 unsigned char state = STATE_INIT; // Current system state
-boolean started = false; // Whether the controller/timer is started
+boolean running = false; // Whether the controller/timer is running
 unsigned long now; // Current time (time elapsed since power-on) [ms]
 unsigned char adjustTarget = ADJUST_TEMP; // What the PLUS/MINUS buttons are adjusting
 unsigned long lastSampleTimestamp; // The timestamp of the last temperature sample that was taken [ms]
@@ -184,7 +189,7 @@ void displayStatus() {
 
   lcd.setCursor(0, 3);
   lcd.print("State: ");
-  if (started) {
+  if (running) {
     lcd.print("RUN  ");
   } else {
     lcd.print("STOP ");
@@ -352,8 +357,8 @@ void decreaseTimer() {
 
 // Handle button events
 void handleEvent(char button, char event) {
-  // Handle PLUS/MINUS/FUNCTION buttons
-  if (state == STATE_MAIN) {
+  switch (state) {
+  case STATE_MAIN:
     switch (button) {
     case BUTTON_PLUS:
       if (adjustTarget == ADJUST_TEMP) {
@@ -385,18 +390,48 @@ void handleEvent(char button, char event) {
       }
       updateNeeded = true;
       break;
+    
+    case BUTTON_START:
+      if (!running) {
+        running = true;
+        lastTick = now;
+        updateNeeded = true;
+      }
+      break;
+     
+    case BUTTON_STOP:
+      if (running) {
+        relayOff();
+        running = false;
+        updateNeeded = true;
+      }
     }
-  }
-  
-  // Handle START/STOP buttons
-  if (button == BUTTON_START && !started) {
-    started = true;
-    lastTick = now;
-    updateNeeded = true;
-  } else if (button == BUTTON_STOP && started) {
-    relayOff();
-    started = false;
-    updateNeeded = true;
+    break;
+    
+  case STATE_MENU:
+    switch (button) {
+    case BUTTON_PLUS:
+      // TODO: next menu item
+      break;
+    
+    case BUTTON_MINUS:
+      // TODO: prev menu item
+      break;
+    
+    case BUTTON_FUNCTION:
+      // NO-OP
+      break;
+    
+    case BUTTON_START:
+      // TODO: enter selected menu
+      break;
+     
+    case BUTTON_STOP:
+      state = STATE_MAIN;
+      updateNeeded = true;
+      break;
+    }
+    break;    
   }
 }
 
@@ -523,14 +558,14 @@ void loop() {
   now = millis();
 
   // Decrement the timer
-  if (timer > 0 && started) {
+  if (timer > 0 && running) {
     if (now > (lastTick + MINUTE)) {
       lastTick += MINUTE;
       timer--;
       updateNeeded = true;
       if (timer == 0) {
         // Reached the preset time
-        started = false;
+        running = false;
         relayOff();
         timer = -1;
       }
@@ -548,7 +583,7 @@ void loop() {
   if (now > windowStartTime + WINDOW_SIZE) {
     windowStartTime += WINDOW_SIZE;
   }
-  if (started) {
+  if (running) {
     // Set the relay state according to the PID output
     if (now <= windowStartTime + onDuration) {
       relayOn();
@@ -557,17 +592,17 @@ void loop() {
     }
   }
   
-  // Update the display if needed
-  if (updateNeeded) {
-    updateDisplay();
-    updateNeeded = false;
-  }
-
   // Poll button states
   plusButton.tick();
   minusButton.tick();
   startButton.tick();
   stopButton.tick();
   functionButton.tick();
+
+  // Update the display if needed
+  if (updateNeeded) {
+    updateDisplay();
+    updateNeeded = false;
+  }
 }
 
