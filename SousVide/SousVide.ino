@@ -9,8 +9,6 @@
 // Uncomment to include debugging code
 //#define DEBUG 1
 
-// TODO: Implement timer
-
 #define SERIAL_SPEED 115200
 
 // Configuration data address in the EEPROM
@@ -65,8 +63,8 @@
 
 // Possible states
 #define STATE_INIT 0
-#define STATE_STOPPED 1
-#define STATE_RUNNING 2
+#define STATE_MAIN 1
+#define STATE_MENU 3
 // TODO: add states for
 // - balance resistor value setting
 // - temperature calibration
@@ -93,6 +91,7 @@
 // Global state variables
 //
 unsigned char state = STATE_INIT; // Current system state
+boolean started = false; // Whether the controller/timer is started
 unsigned long now; // Current time (time elapsed since power-on) [ms]
 unsigned char adjustTarget = ADJUST_TEMP; // What the PLUS/MINUS buttons are adjusting
 unsigned long lastSampleTimestamp; // The timestamp of the last temperature sample that was taken [ms]
@@ -113,7 +112,7 @@ Thermistor thermistor(PIN_THERMISTOR); // NCT thermistor
 
 // PID Controller
 // TODO: move PID parameters to EEPROM and make them modifiable via the config menu
-PID pid(&currentTemp, &onDuration, &targetTemp, 4.0, 5.0, 0.5, DIRECT); // PID controller
+PID pid(&currentTemp, &onDuration, &targetTemp, 5.0, 1.0, 2.0, DIRECT); // PID controller
 
 // LCD Display
 LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
@@ -147,8 +146,12 @@ void formatTemp(char* output, double temperature) {
 }
 
 
-// Display related functions
-void updateDisplay() {
+void displayInitMessage() {
+  // TODO
+}
+
+
+void displayStatus() {
   lcd.setCursor(0,0);  
   lcd.print("Current: ");
   char temp[8];
@@ -181,22 +184,35 @@ void updateDisplay() {
 
   lcd.setCursor(0, 3);
   lcd.print("State: ");
-  switch (state) {
-    case STATE_INIT:
-      lcd.print("INIT ");
-      break;
-    case STATE_STOPPED:
-      lcd.print("STOP ");
-      break;
-    case STATE_RUNNING:
-      lcd.print("RUN  ");
-      break;
+  if (started) {
+    lcd.print("RUN  ");
+  } else {
+    lcd.print("STOP ");
   }
   
   lcd.print("Out: ");
   lcd.print(relayState ? "ON " : "OFF");
 }
 
+
+void displayMenu() {
+  // TODO
+}
+
+// Display related functions
+void updateDisplay() {
+  switch (state) {
+  case STATE_INIT:
+    displayInitMessage();
+    break;
+  case STATE_MAIN:
+    displayStatus();
+    break;
+  case STATE_MENU:
+    displayMenu();
+    break;
+  }
+}
 
 
 // Configuration data layout in EEPROM:
@@ -336,8 +352,8 @@ void decreaseTimer() {
 
 // Handle button events
 void handleEvent(char button, char event) {
-  if (state == STATE_STOPPED
-      || state == STATE_RUNNING) {
+  // Handle PLUS/MINUS/FUNCTION buttons
+  if (state == STATE_MAIN) {
     switch (button) {
     case BUTTON_PLUS:
       if (adjustTarget == ADJUST_TEMP) {
@@ -347,6 +363,7 @@ void handleEvent(char button, char event) {
       }
       updateNeeded = true;
       break;
+    
     case BUTTON_MINUS:
       if (adjustTarget == ADJUST_TEMP) {
         decreaseTargetTemp();
@@ -355,33 +372,31 @@ void handleEvent(char button, char event) {
       }
       updateNeeded = true;
       break;
+    
     case BUTTON_FUNCTION:
-      if (adjustTarget == ADJUST_TIMER) {
-        adjustTarget = ADJUST_TEMP;
-      } else {
-        adjustTarget = ADJUST_TIMER;
+      if (event == EVENT_CLICK) {
+        if (adjustTarget == ADJUST_TIMER) {
+          adjustTarget = ADJUST_TEMP;
+        } else {
+          adjustTarget = ADJUST_TIMER;
+        }
+      } else if (event == EVENT_LONGPRESS) {
+        state = STATE_MENU;
       }
       updateNeeded = true;
       break;
     }
   }
   
-  if (state == STATE_STOPPED) {
-    switch (button) {
-      case BUTTON_START:
-      state = STATE_RUNNING;
-      lastTick = now;
-      updateNeeded = true;
-      break;
-    }
-  } else if (state == STATE_RUNNING) {
-    switch (button) {
-      case BUTTON_STOP:
-      relayOff();
-      state = STATE_STOPPED;
-      updateNeeded = true;
-      break;
-    }
+  // Handle START/STOP buttons
+  if (button == BUTTON_START && !started) {
+    started = true;
+    lastTick = now;
+    updateNeeded = true;
+  } else if (button == BUTTON_STOP && started) {
+    relayOff();
+    started = false;
+    updateNeeded = true;
   }
 }
 
@@ -473,7 +488,7 @@ void setup() {
   // We should take a few temperature samples to make sure
   // it's stable before we transition from STATE_INIT to STATE_STOPPED
 
-  state = STATE_STOPPED;  
+  state = STATE_MAIN; 
   updateDisplay();
 }  
 
@@ -508,14 +523,14 @@ void loop() {
   now = millis();
 
   // Decrement the timer
-  if (timer > 0 && state == STATE_RUNNING) {
+  if (timer > 0 && started) {
     if (now > (lastTick + MINUTE)) {
       lastTick += MINUTE;
       timer--;
       updateNeeded = true;
       if (timer == 0) {
         // Reached the preset time
-        state = STATE_STOPPED;
+        started = false;
         relayOff();
         timer = -1;
       }
@@ -533,7 +548,7 @@ void loop() {
   if (now > windowStartTime + WINDOW_SIZE) {
     windowStartTime += WINDOW_SIZE;
   }
-  if (state == STATE_RUNNING) {
+  if (started) {
     // Set the relay state according to the PID output
     if (now <= windowStartTime + onDuration) {
       relayOn();
