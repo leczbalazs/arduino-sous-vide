@@ -7,9 +7,18 @@
 #include <Thermistor.h>
 
 // TODOs
-// - refactor temperature measurement to use moving window average (smoothing)
 // - implement PID tuning menu
 // - implement saving/loading PID parameters
+// - balance resistor value setting menu
+// - temperature calibration menu
+// - PID auto-tune
+// - refactor constants to express tuning as in http://freshmealssolutions.com/downloads/PID-tuning-guide_R2_V006.pdf
+// - Anti-windup setting (% of proportional band)
+// - factory reset
+// - manual output on/off
+// - debug
+// - only start timer when 
+
 
 // Uncomment to include debugging code
 //#define DEBUG 1
@@ -41,15 +50,23 @@
 // Default target temperature
 #define DEFAULT_TARGET_TEMP 55.0 // [C]
 
-// Interval between temperature measurements
-#define SAMPLE_INTERVAL 250 // [ms]
+// Interval between two updates of the current temperature value
+#define UPDATE_INTERVAL 1000 // [ms]
+
+// Number of samples to take between two temperature updates
+// This many samples are kept in the moving window
+#define N_SAMPLES 100
+// The length of the moving window for smoothing temperature measurements
+#define MOVING_WINDOW_SIZE 10000 // [ms]
+// The interval between two temperature measurements
+#define SAMPLE_INTERVAL (MOVING_WINDOW_SIZE / N_SAMPLES) // [ms]
 
 // Control window size (for turning the PID output value into a slow PWM signal)
 #define WINDOW_SIZE 5000 // [ms]
 
 // Minimum time the relay is allowed to turn on
 // There's no point in turning on a mechanical relay for less than 200 ms
-#define MIN_ON_DURATION 200 // [ms]
+#define MIN_OUTPUT_DURATION 200 // [ms]
 
 // Target temperature boundaries
 #define MIN_TARGET_TEMP 20.0 // [C]
@@ -69,14 +86,7 @@
 // Possible states
 #define STATE_INIT 0
 #define STATE_MAIN 1
-#define STATE_MENU 3
-// TODO: add states for
-// - balance resistor value setting
-// - temperature calibration
-// - PID settings (auto-calibration?)
-// - factory reset?
-// - manual output on/off?
-// - error
+#define STATE_MENU 2
 
 // Possible events
 #define EVENT_CLICK 0
@@ -100,6 +110,7 @@ boolean running = false; // Whether the controller/timer is running
 unsigned long now; // Current time (time elapsed since power-on) [ms]
 unsigned char adjustTarget = ADJUST_TEMP; // What the PLUS/MINUS buttons are adjusting
 unsigned long lastSampleTimestamp; // The timestamp of the last temperature sample that was taken [ms]
+unsigned long lastUpdateTimestamp; // The timestamp of the last temperature update [ms]
 double currentTemp; // Current temperature [C]
 double targetTemp = DEFAULT_TARGET_TEMP; // Target temperature [C]
 int timer = -1; // Current number of minutes on the timer (negative values mean the timer is disabled) [min]
@@ -109,6 +120,9 @@ boolean relayState; // Current state of the relay [false: off, true: on]
 boolean updateNeeded; // Whether a display update is required
 unsigned long lastTick; // Timestamp of the last timer decrement [ms]
 
+double samples[N_SAMPLES];
+unsigned char currentSample = 0;
+
 //
 // Global objects
 //
@@ -116,8 +130,8 @@ unsigned long lastTick; // Timestamp of the last timer decrement [ms]
 Thermistor thermistor(PIN_THERMISTOR); // NCT thermistor
 
 // PID Controller
-// TODO: move PID parameters to EEPROM and make them modifiable via the config menu
-PID pid(&currentTemp, &onDuration, &targetTemp, 5.0, 1.0, 2.0, DIRECT); // PID controller
+// This gives +/-0.3C on my crock pot
+PID pid(&currentTemp, &onDuration, &targetTemp, 2000.0, 1.0, 100.0, DIRECT); // PID controller
 
 // LCD Display
 LiquidCrystal lcd(PIN_LCD_RS, PIN_LCD_EN, PIN_LCD_D4, PIN_LCD_D5, PIN_LCD_D6, PIN_LCD_D7);
@@ -152,7 +166,8 @@ void formatTemp(char* output, double temperature) {
 
 
 void displayInitMessage() {
-  // TODO
+  lcd.clear();
+  lcd.print("Initializing...");
 }
 
 
@@ -201,8 +216,11 @@ void displayStatus() {
 
 
 void displayMenu() {
-  // TODO
+  lcd.clear();
+  lcd.home();
+  lcd.print("Menu");
 }
+
 
 // Display related functions
 void updateDisplay() {
@@ -429,6 +447,7 @@ void handleEvent(char button, char event) {
     case BUTTON_STOP:
       state = STATE_MAIN;
       updateNeeded = true;
+      lcd.clear();  
       break;
     }
     break;    
@@ -488,6 +507,43 @@ void relayOff() {
 }
 
 
+void sampleTemperature() {
+  double reading = thermistor.getTemperatureCelsius();
+
+#ifdef DEBUG
+  LOG2("ADC value: ", thermistor.getADC());
+  LOG2("Resistance: ", thermistor.getR());
+  LOG2("Temperature: ", reading);
+#endif
+
+  if (reading > MIN_TEMP && reading < MAX_TEMP) {
+    samples[currentSample] = reading;
+    currentSample = (currentSample + 1) % N_SAMPLES;
+    lastSampleTimestamp = now;
+  } else {
+    LOG2("Temperature outside of accepted range; rejecting value ", reading);
+    // TODO: move to an error state after multiple rejected readings
+  }
+}
+
+
+void updateTemperature() {
+  double newTemp = 0.0;
+  int n = 0;
+  for (int i = 0; i < N_SAMPLES; i++) {
+    if (samples[i] > 0.0) {
+      newTemp += samples[i];
+      n++;
+    }
+  }
+  
+  if (n > 0) {
+    currentTemp = newTemp / n;
+    lastUpdateTimestamp = now;
+  }
+}
+
+
 void setup() {
   // Set serial speed
   Serial.begin(SERIAL_SPEED);
@@ -511,6 +567,7 @@ void setup() {
   // Set up the PID controller
   pid.SetMode(AUTOMATIC);
   pid.SetOutputLimits(0, WINDOW_SIZE);
+  pid.SetSampleTime(UPDATE_INTERVAL);
 
   // Attach button handler functions
   plusButton.attachClick(plusButtonClicked);
@@ -520,38 +577,15 @@ void setup() {
   functionButton.attachClick(functionButtonClicked);
   functionButton.attachLongPress(functionButtonLongPressed);
 
-  // We should take a few temperature samples to make sure
-  // it's stable before we transition from STATE_INIT to STATE_STOPPED
-
-  state = STATE_MAIN; 
+  // Take one temperature sample
+  sampleTemperature();
+  updateTemperature();
+  
+  state = STATE_MAIN;
+  lcd.clear();
   updateDisplay();
 }  
 
-
-void sampleTemperature() {
-  double reading = thermistor.getTemperatureCelsius();
-  lastSampleTimestamp = now;
-
-#ifdef DEBUG
-  LOG2("ADC value: ", thermistor.getADC());
-  LOG2("Resistance: ", thermistor.getR());
-  LOG2("Temperature: ", reading);
-#endif
-
-  if (reading > MIN_TEMP && reading < MAX_TEMP) {
-    currentTemp = reading;
-    pid.Compute();
-    LOG2("Current temperature [C]: ", currentTemp);
-    LOG2("Relay ON duration [ms]: ", onDuration);
-    if (onDuration < MIN_ON_DURATION) {
-      onDuration = 0;
-    }
-    LOG2("Relay ON duration after applying minimum limit [ms]: ", onDuration);
-  } else {
-    LOG2("Temperature outside of accepted range; rejecting value ", reading);
-    // TODO: move to an error state after multiple rejected readings
-  }
-}
 
 // Main loop
 void loop() {
@@ -576,6 +610,33 @@ void loop() {
   if (now > lastSampleTimestamp + SAMPLE_INTERVAL
       || now < lastSampleTimestamp) { // millis() wrapped around
     sampleTemperature();
+  }
+  
+  // Update the temperature and the PID controller
+  if (now > lastUpdateTimestamp + UPDATE_INTERVAL
+      || now < lastUpdateTimestamp) { // millis() wrapped around
+    updateTemperature();
+    LOG2("Current temperature (moving average) [C]: ", currentTemp);
+    LOG2("Error [C]: ", targetTemp - currentTemp);
+    pid.Compute();
+    LOG2("Relay ON duration calculated by PID controller [ms]: ", onDuration);
+    if (onDuration < MIN_OUTPUT_DURATION) {
+      onDuration = 0;
+      LOG2("Corrected relay ON duration [ms]: ", onDuration);
+    }
+    if (onDuration > WINDOW_SIZE - MIN_OUTPUT_DURATION) {
+      onDuration = WINDOW_SIZE;
+      LOG2("Corrected relay ON duration [ms]: ", onDuration);
+    }
+    
+    // Force a minimum output, to keep the temperature from falling too quickly.
+    // This has to be slightly more than what's required to keep the temperature constant.
+    onDuration += 1200.0;
+    
+    // Dirty hack to keep the heating element warm and avoid a large under-shoot
+    if (currentTemp > targetTemp + 0.05) {
+      onDuration = 200.0;
+    }
     updateNeeded = true; 
   }
 
@@ -583,6 +644,8 @@ void loop() {
   if (now > windowStartTime + WINDOW_SIZE) {
     windowStartTime += WINDOW_SIZE;
   }
+
+  // Switch the output on/off
   if (running) {
     // Set the relay state according to the PID output
     if (now <= windowStartTime + onDuration) {
