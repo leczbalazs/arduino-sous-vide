@@ -13,11 +13,12 @@
 // - temperature calibration menu
 // - PID auto-tune
 // - refactor constants to express tuning as in http://freshmealssolutions.com/downloads/PID-tuning-guide_R2_V006.pdf
-// - Anti-windup setting (% of proportional band)
+// - anti-windup setting (% of proportional band)
+// - deviation stats (min/max/avg/std-dev/90 percentile)
 // - factory reset
 // - manual relay on/off
 // - debug
-// - only start timer when 
+// - only start timer when temperature reaches the target temp 
 
 
 // Uncomment to include debugging code
@@ -55,7 +56,7 @@
 
 // Number of samples to take between two temperature updates
 // This many samples are kept in the moving window
-#define N_SAMPLES 100
+#define N_SAMPLES 100 // max: 255
 // The length of the moving window for smoothing temperature measurements
 #define MOVING_WINDOW_SIZE 10000 // [ms]
 // The interval between two temperature measurements
@@ -87,6 +88,8 @@
 #define STATE_INIT 0
 #define STATE_MAIN 1
 #define STATE_MENU 2
+#define STATE_CALIBRATION 3
+#define STATE_PID_SETTING 4
 
 // Possible events
 #define EVENT_CLICK 0
@@ -96,6 +99,9 @@
 // What the PLUS/MINUS buttons should be adjusting in STATE_MAIN
 #define ADJUST_TEMP 0
 #define ADJUST_TIMER 1
+
+// Number of main menu items
+#define N_MENU_ITEMS 2
 
 // Logging
 #define LOG(x) Serial.print(millis()); Serial.print(": "); Serial.println(x)
@@ -120,8 +126,10 @@ boolean relayState; // Current state of the relay [false: off, true: on]
 boolean updateNeeded; // Whether a display update is required
 unsigned long lastTick; // Timestamp of the last timer decrement [ms]
 
-double samples[N_SAMPLES];
-unsigned char currentSample = 0;
+double samples[N_SAMPLES]; // Temperature samples (circular buffer)
+unsigned char currentSample = 0; // The index of the latest temperature sample in the circular buffer
+
+unsigned char selectedMenuItem = 0; // The index of the currently selected menu item
 
 //
 // Global objects
@@ -216,9 +224,25 @@ void displayStatus() {
 
 
 void displayMenu() {
-  lcd.clear();
   lcd.home();
-  lcd.print("Menu");
+  lcd.print((selectedMenuItem == 0) ? ">" : " ");
+  lcd.print("Thermistor calibr.");
+  lcd.setCursor(0, 1);
+  lcd.print((selectedMenuItem == 1) ? ">" : " ");
+  lcd.print("PID configuration");
+  lcd.setCursor(0, 2);
+}
+
+
+void displayCalibration() {
+  lcd.home();
+  lcd.print("Calibration (TODO)"); 
+}
+
+
+void displayPidSetting() {
+  lcd.home();
+  lcd.print("PID setting. (TODO)"); 
 }
 
 
@@ -233,6 +257,12 @@ void updateDisplay() {
     break;
   case STATE_MENU:
     displayMenu();
+    break;
+  case STATE_CALIBRATION:
+    displayCalibration();
+    break;
+  case STATE_PID_SETTING:
+    displayPidSetting();
     break;
   }
 }
@@ -405,6 +435,8 @@ void handleEvent(char button, char event) {
         }
       } else if (event == EVENT_LONGPRESS) {
         state = STATE_MENU;
+        selectedMenuItem = 0;
+        lcd.clear();
       }
       updateNeeded = true;
       break;
@@ -429,11 +461,18 @@ void handleEvent(char button, char event) {
   case STATE_MENU:
     switch (button) {
     case BUTTON_PLUS:
-      // TODO: next menu item
+      selectedMenuItem++;
+      selectedMenuItem %= N_MENU_ITEMS;
+      updateNeeded = true;
       break;
     
     case BUTTON_MINUS:
-      // TODO: prev menu item
+      if (selectedMenuItem == 0) {
+        selectedMenuItem = N_MENU_ITEMS - 1;
+      } else {
+        selectedMenuItem--;
+      }
+      updateNeeded = true;      
       break;
     
     case BUTTON_FUNCTION:
@@ -441,7 +480,18 @@ void handleEvent(char button, char event) {
       break;
     
     case BUTTON_START:
-      // TODO: enter selected menu
+      switch (selectedMenuItem) {
+      case 0:
+        state = STATE_CALIBRATION;
+        updateNeeded = true;
+        lcd.clear();
+        break;
+      case 1:
+        state = STATE_PID_SETTING;
+        updateNeeded = true;
+        lcd.clear();      
+        break;        
+      }
       break;
      
     case BUTTON_STOP:
@@ -451,6 +501,58 @@ void handleEvent(char button, char event) {
       break;
     }
     break;    
+  
+  case STATE_CALIBRATION:
+    switch (button) {
+    case BUTTON_PLUS:
+      // TODO
+      break;
+    
+    case BUTTON_MINUS:
+      // TODO
+      break;
+    
+    case BUTTON_FUNCTION:
+      // TODO
+      break;
+    
+    case BUTTON_START:
+      // TODO
+      break;
+     
+    case BUTTON_STOP:
+      state = STATE_MENU;
+      updateNeeded = true;
+      lcd.clear();  
+      break;
+    }
+    break;
+
+  case STATE_PID_SETTING:
+    switch (button) {
+    case BUTTON_PLUS:
+      // TODO
+      break;
+    
+    case BUTTON_MINUS:
+      // TODO
+      break;
+    
+    case BUTTON_FUNCTION:
+      // TODO
+      break;
+    
+    case BUTTON_START:
+      // TODO
+      break;
+     
+    case BUTTON_STOP:
+      state = STATE_MENU;
+      updateNeeded = true;
+      lcd.clear();  
+      break;
+    }
+    break;
   }
 }
 
