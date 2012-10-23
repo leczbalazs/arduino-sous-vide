@@ -15,7 +15,7 @@
 // - refactor constants to express tuning as in http://freshmealssolutions.com/downloads/PID-tuning-guide_R2_V006.pdf
 // - Anti-windup setting (% of proportional band)
 // - factory reset
-// - manual output on/off
+// - manual relay on/off
 // - debug
 // - only start timer when 
 
@@ -66,7 +66,7 @@
 
 // Minimum time the relay is allowed to turn on
 // There's no point in turning on a mechanical relay for less than 200 ms
-#define MIN_OUTPUT_DURATION 200 // [ms]
+#define MIN_RELAY_DURATION 200 // [ms]
 
 // Target temperature boundaries
 #define MIN_TARGET_TEMP 20.0 // [C]
@@ -553,7 +553,7 @@ void setup() {
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(PIN_STATUS_LED, OUTPUT);
 
-  // Make sure the output is off by default
+  // Make sure the relay is off by default
   relayOff();
 
   // Set up the display with 16 characters and 2 lines
@@ -620,11 +620,11 @@ void loop() {
     LOG2("Error [C]: ", targetTemp - currentTemp);
     pid.Compute();
     LOG2("Relay ON duration calculated by PID controller [ms]: ", onDuration);
-    if (onDuration < MIN_OUTPUT_DURATION) {
+    if (onDuration < MIN_RELAY_DURATION) {
       onDuration = 0;
       LOG2("Corrected relay ON duration [ms]: ", onDuration);
     }
-    if (onDuration > WINDOW_SIZE - MIN_OUTPUT_DURATION) {
+    if (onDuration > WINDOW_SIZE - MIN_RELAY_DURATION) {
       onDuration = WINDOW_SIZE;
       LOG2("Corrected relay ON duration [ms]: ", onDuration);
     }
@@ -645,7 +645,7 @@ void loop() {
     windowStartTime += WINDOW_SIZE;
   }
 
-  // Switch the output on/off
+  // Switch the relay on/off
   if (running) {
     // Set the relay state according to the PID output
     if (now <= windowStartTime + onDuration) {
